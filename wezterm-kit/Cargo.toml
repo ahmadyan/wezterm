@@ -1,0 +1,16 @@
+[package]
+name = "wezterm-kit"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ahmadyan/wezterm"
+description = "Standalone-friendly embeddable WezTerm session bridge"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+portable-pty.workspace = true
+wezterm-escape-parser = { workspace = true, features = ["std"] }

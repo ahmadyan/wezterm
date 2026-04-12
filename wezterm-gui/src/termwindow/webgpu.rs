@@ -49,6 +49,12 @@ impl RawHandlePair {
             display: window.display_handle().expect("display handle").as_raw(),
         }
     }
+
+    /// Construct from raw handles. Used by embedders that don't have a
+    /// wezterm `Window` instance (e.g. libwezterm wrapping an NSView).
+    pub fn from_raw(window: RawWindowHandle, display: RawDisplayHandle) -> Self {
+        Self { window, display }
+    }
 }
 
 impl HasWindowHandle for RawHandlePair {

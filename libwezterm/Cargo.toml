@@ -1,0 +1,47 @@
+[package]
+name = "libwezterm"
+version = "0.1.0"
+edition = "2021"
+description = "C FFI wrapper around wezterm-term for embedding in native applications"
+license = "MIT"
+
+[lib]
+name = "wezterm_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+# Terminal emulation core
+wezterm-term = { path = "../term" }
+termwiz = { path = "../termwiz", features = ["use_image"] }
+wezterm-cell = { path = "../wezterm-cell", features = ["std", "use_image"] }
+wezterm-surface = { path = "../wezterm-surface", features = ["std", "appdata", "use_image"] }
+wezterm-escape-parser = { path = "../wezterm-escape-parser", features = ["std", "use_image"] }
+wezterm-color-types = { path = "../color-types", default-features = false }
+wezterm-dynamic = { path = "../wezterm-dynamic", features = ["std"] }
+wezterm-bidi = { path = "../bidi", default-features = false }
+
+# GPU rendering + font shaping (uses wezterm-gui's actual rendering pipeline)
+config = { path = "../config" }
+wezterm-font = { path = "../wezterm-font" }
+wezterm-gui = { path = "../wezterm-gui", default-features = false }
+wgpu.workspace = true
+window = { path = "../window" }
+raw-window-handle.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+euclid = { workspace = true, default-features = false }
+ordered-float.workspace = true
+lfucache = { path = "../lfucache" }
+mux = { path = "../mux" }
+promise = { path = "../promise" }
+portable-pty = { path = "../pty" }
+
+pollster = "0.4"
+
+# Core utilities
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
+libc = "0.2"
+
+[build-dependencies]
+cbindgen = "0.27"

@@ -19,6 +19,12 @@ pub fn shutdown() {
     CONN.with(|m| drop(m.borrow_mut().take()));
 }
 
+/// Store the given Connection as the thread-local current connection.
+/// Used by embedded init paths that bypass `ConnectionOps::init`.
+pub fn set_thread_conn(conn: Rc<Connection>) {
+    CONN.with(|m| *m.borrow_mut() = Some(conn));
+}
+
 #[derive(Debug)]
 pub enum ApplicationEvent {
     /// The system wants to open a command in the terminal
@@ -54,6 +60,15 @@ pub trait ConnectionOps {
     }
 
     fn init() -> Fallible<Rc<Connection>> {
+        // Idempotent: if a Connection has already been initialized in this
+        // thread (e.g. via init_embedded), reuse it instead of creating a
+        // second one. This lets host apps like libwezterm run their embedded
+        // init first, and any subsequent wezterm-gui code that calls init()
+        // will reuse the existing embedded connection instead of stomping it
+        // (and overwriting the host's NSApplicationDelegate).
+        if let Some(existing) = Self::get() {
+            return Ok(existing);
+        }
         let conn = Rc::new(Connection::create_new()?);
         CONN.with(|m| *m.borrow_mut() = Some(Rc::clone(&conn)));
         crate::spawn::SPAWN_QUEUE.register_promise_schedulers();

@@ -13,7 +13,23 @@ use promise::{Future, Promise};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// When set, wezterm will not touch NSApp's main menu (used by host apps that
+/// embed wezterm and own their own menu bar).
+static EMBEDDED_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Mark wezterm as running embedded inside a host app. Must be called before
+/// `try_new`. Skips menu-bar installation that would otherwise replace the
+/// host app's NSApp.mainMenu and crash SwiftUI.
+pub fn set_embedded_mode() {
+    EMBEDDED_MODE.store(true, Ordering::SeqCst);
+}
+
+pub fn is_embedded_mode() -> bool {
+    EMBEDDED_MODE.load(Ordering::SeqCst)
+}
 use wezterm_term::{Alert, ClipboardSelection};
 use wezterm_toast_notification::*;
 
@@ -210,7 +226,10 @@ impl GuiFrontEnd {
 
         // And build the initial menu bar.
         // TODO: arrange for this to happen on config reload.
-        crate::commands::CommandDef::recreate_menubar(&config::configuration());
+        // Skip when embedded — the host app owns NSApp.mainMenu.
+        if !is_embedded_mode() {
+            crate::commands::CommandDef::recreate_menubar(&config::configuration());
+        }
 
         Ok(front_end)
     }
@@ -461,6 +480,18 @@ impl GuiFrontEnd {
         }
     }
 
+    /// Look up the underlying `window::Window` for the given mux window id.
+    /// Used by embedders that need to extract the OS window pointer.
+    pub fn known_window_for_mux(&self, mux_window_id: MuxWindowId) -> Option<Window> {
+        let windows = self.known_windows.borrow();
+        for (window, v) in windows.iter() {
+            if *v == mux_window_id {
+                return Some(window.clone());
+            }
+        }
+        None
+    }
+
     pub fn forget_known_window(&self, window: &Window) {
         self.known_windows.borrow_mut().remove(window);
         if !self.is_switching_workspace() {
@@ -534,7 +565,9 @@ pub fn try_new() -> Result<Rc<GuiFrontEnd>, Error> {
     let config_subscription = config::subscribe_to_config_reload({
         move || {
             promise::spawn::spawn_into_main_thread(async {
-                crate::commands::CommandDef::recreate_menubar(&config::configuration());
+                if !is_embedded_mode() {
+                    crate::commands::CommandDef::recreate_menubar(&config::configuration());
+                }
             })
             .detach();
             true
