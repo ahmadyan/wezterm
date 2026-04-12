@@ -16,6 +16,8 @@ members = [
   "wezterm-ssh",
   "wezterm-surface",
   "wezterm-uds",
+  "libwezterm",
+  "wezterm-kit",
 ]
 resolver = "2"
 exclude = [

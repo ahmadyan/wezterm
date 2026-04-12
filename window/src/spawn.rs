@@ -219,8 +219,22 @@ impl SpawnQueue {
         _: CFRunLoopActivity,
         _: *mut std::ffi::c_void,
     ) {
-        if SPAWN_QUEUE.run() {
-            Self::queue_wakeup();
+        // Wrap in catch_unwind to prevent panics inside queued promises
+        // from aborting the host app (panics can't unwind across extern "C").
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if SPAWN_QUEUE.run() {
+                Self::queue_wakeup();
+            }
+        }));
+        if let Err(panic) = result {
+            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic>".to_string()
+            };
+            log::error!("[SpawnQueue::trigger] caught panic: {}", msg);
         }
     }
 

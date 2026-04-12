@@ -7,6 +7,17 @@ build = "build.rs"
 resolver = "2"
 publish = false
 
+# Expose wezterm-gui as a library so embedders (libwezterm) can use the
+# rendering modules (glyphcache, renderstate, screen_line, etc.) directly
+# rather than reimplementing them.
+[lib]
+name = "wezterm_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wezterm-gui"
+path = "src/main.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]

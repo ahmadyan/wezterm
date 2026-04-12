@@ -193,6 +193,15 @@ fn cairo() {
         cfg.file(&format!("cairo/{f}"));
     }
 
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        for f in [
+            "src/cairo-quartz-surface.c",
+            "src/cairo-quartz-image-surface.c",
+        ] {
+            cfg.file(&format!("cairo/{f}"));
+        }
+    }
+
     cfg.include("cairo/src");
     cfg.include("pixman/pixman");
 
@@ -206,10 +215,22 @@ fn cairo() {
     cfg.define("HAVE_STDINT_H", Some("1"));
     cfg.define("HAVE_UINT64_T", Some("1"));
 
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        cfg.define("CAIRO_HAS_QUARTZ_SURFACE", Some("1"));
+        cfg.define("CAIRO_HAS_QUARTZ_IMAGE_SURFACE", Some("1"));
+    }
+
     cfg.compile("cairo");
 }
 
 fn main() {
     pixman();
     cairo();
+
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-lib=framework=ApplicationServices");
+        println!("cargo:rustc-link-lib=framework=CoreGraphics");
+        println!("cargo:rustc-link-lib=framework=CoreText");
+        println!("cargo:rustc-link-lib=framework=ImageIO");
+    }
 }

@@ -28,16 +28,41 @@ pub struct Connection {
 
 impl Connection {
     pub(crate) fn create_new() -> anyhow::Result<Self> {
+        Self::create_new_impl(true)
+    }
+
+    /// Create a Connection that does NOT install its own NSApplicationDelegate
+    /// or set the activation policy. This is for embedders (e.g. libwezterm
+    /// embedded in another macOS app) that already have their own AppDelegate
+    /// and NSApplication setup. The embedder is responsible for ensuring
+    /// NSApp is initialized before calling this.
+    pub fn create_new_embedded() -> anyhow::Result<Self> {
+        Self::create_new_impl(false)
+    }
+
+    /// Initialize a Connection in embedded mode and store it in the thread-local
+    /// slot. Equivalent to `Connection::init()` but skips the AppKit ownership
+    /// setup so the embedder's existing NSApplication delegate is preserved.
+    pub fn init_embedded() -> anyhow::Result<Rc<Connection>> {
+        let conn = Rc::new(Self::create_new_embedded()?);
+        crate::connection::set_thread_conn(Rc::clone(&conn));
+        crate::spawn::SPAWN_QUEUE.register_promise_schedulers();
+        Ok(conn)
+    }
+
+    fn create_new_impl(install_app_delegate: bool) -> anyhow::Result<Self> {
         // Ensure that the SPAWN_QUEUE is created; it will have nothing
         // to run right now.
         SPAWN_QUEUE.run();
 
         unsafe {
             let ns_app = NSApp();
-            ns_app.setActivationPolicy_(NSApplicationActivationPolicyRegular);
+            if install_app_delegate {
+                ns_app.setActivationPolicy_(NSApplicationActivationPolicyRegular);
 
-            let delegate = create_app_delegate();
-            let () = msg_send![ns_app, setDelegate: delegate];
+                let delegate = create_app_delegate();
+                let () = msg_send![ns_app, setDelegate: delegate];
+            }
 
             let conn = Self {
                 ns_app,
