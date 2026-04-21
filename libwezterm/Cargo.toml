@@ -22,7 +22,13 @@ wezterm-bidi = { path = "../bidi", default-features = false }
 
 # GPU rendering + font shaping (uses wezterm-gui's actual rendering pipeline)
 config = { path = "../config" }
-wezterm-font = { path = "../wezterm-font" }
+# Bundle JetBrains Mono and Symbols Nerd Font so the terminal still renders on
+# machines where neither is installed system-wide. Without these features,
+# resolve_font_helper_impl returns an empty handles list on bare macOS installs
+# and RenderMetrics::new fails with "metrics_for_idx: there is no font with
+# idx=0". make_font_config's Menlo/Apple Symbols fallback chain is a second
+# line of defense; this guarantees a match regardless of system font state.
+wezterm-font = { path = "../wezterm-font", features = ["vendor-jetbrains", "vendor-nerd-font-symbols"] }
 wezterm-gui = { path = "../wezterm-gui", default-features = false }
 wgpu.workspace = true
 window = { path = "../window" }
