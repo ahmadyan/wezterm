@@ -91,12 +91,48 @@ impl wezterm_term::terminal::AlertHandler for FFIAlertHandler {
 }
 
 // ---------------------------------------------------------------------------
+// Selection tracking for copy/paste support.
+// ---------------------------------------------------------------------------
+
+/// Represents a point in terminal coordinates (column, row)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectionPoint {
+    x: usize,
+    y: isize,
+}
+
+/// Tracks the current text selection state
+#[derive(Debug, Clone)]
+struct SelectionRange {
+    start: SelectionPoint,
+    end: SelectionPoint,
+}
+
+impl SelectionRange {
+    /// Returns (start, end) in normalized order (start <= end)
+    fn normalized(&self) -> (SelectionPoint, SelectionPoint) {
+        if self.start.y < self.end.y || (self.start.y == self.end.y && self.start.x <= self.end.x) {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Opaque handle wrapping the terminal instance and associated state.
 // ---------------------------------------------------------------------------
 
 pub(crate) struct TerminalInstance {
     pub(crate) terminal: Terminal,
     pub(crate) output_buffer: Arc<Mutex<Vec<u8>>>,
+    /// Viewport offset for scrollback viewing. 0 means showing the live terminal output,
+    /// positive values scroll back into history.
+    pub(crate) viewport_offset: isize,
+    /// Current text selection, if any
+    selection: Option<SelectionRange>,
+    /// Whether a mouse drag selection is in progress
+    selecting: bool,
 }
 
 /// Opaque handle to a WezTerm terminal instance.
@@ -176,6 +212,9 @@ pub extern "C" fn wezterm_new(
         inner: Box::new(TerminalInstance {
             terminal,
             output_buffer,
+            viewport_offset: 0,
+            selection: None,
+            selecting: false,
         }),
     });
 
@@ -597,9 +636,46 @@ pub unsafe extern "C" fn wezterm_mouse_event(
     if handle.is_null() {
         return false;
     }
-    let term = &mut (*handle).inner.terminal;
+    let instance = &mut (*handle).inner;
+
+    // Handle selection tracking for left mouse button
+    let is_left_button = matches!(button, WezTermMouseButton::Left);
+    let kind_termwiz = kind.to_termwiz();
+
+    if is_left_button {
+        use wezterm_term::input::MouseEventKind as MEK;
+        match kind_termwiz {
+            MEK::Press => {
+                // Start new selection
+                let point = SelectionPoint {
+                    x: x as usize,
+                    y: y as isize - instance.viewport_offset,
+                };
+                instance.selection = Some(SelectionRange {
+                    start: point,
+                    end: point,
+                });
+                instance.selecting = true;
+            }
+            MEK::Move if instance.selecting => {
+                // Extend selection during drag
+                if let Some(ref mut sel) = instance.selection {
+                    sel.end = SelectionPoint {
+                        x: x as usize,
+                        y: y as isize - instance.viewport_offset,
+                    };
+                }
+            }
+            MEK::Release => {
+                // End selection
+                instance.selecting = false;
+            }
+            _ => {}
+        }
+    }
+
     let event = wezterm_term::input::MouseEvent {
-        kind: kind.to_termwiz(),
+        kind: kind_termwiz,
         x: x as usize,
         y: y as wezterm_term::VisibleRowIndex,
         x_pixel_offset: 0,
@@ -608,7 +684,7 @@ pub unsafe extern "C" fn wezterm_mouse_event(
         modifiers: termwiz::input::Modifiers::from_bits_truncate(modifiers as u16),
     };
 
-    term.mouse_event(event).is_ok()
+    instance.terminal.mouse_event(event).is_ok()
 }
 
 /// Send a paste operation to the terminal.
@@ -721,6 +797,103 @@ pub unsafe extern "C" fn wezterm_free_string(s: *mut c_char) {
     if !s.is_null() {
         drop(CString::from_raw(s));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Selection API
+// ---------------------------------------------------------------------------
+
+/// Check whether there is an active text selection.
+///
+/// # Safety
+/// `handle` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wezterm_has_selection(handle: *const WezTermHandle) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+    let instance = &(*handle).inner;
+    if let Some(ref sel) = instance.selection {
+        // Only report selection if start != end
+        sel.start != sel.end
+    } else {
+        false
+    }
+}
+
+/// Get the currently selected text.
+///
+/// # Returns
+/// A newly allocated C string containing the selected text, or NULL if no selection.
+/// The caller must free it with `wezterm_free_string()`.
+///
+/// # Safety
+/// `handle` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wezterm_get_selection(handle: *mut WezTermHandle) -> *mut c_char {
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+    let instance = &mut (*handle).inner;
+    let selection = match &instance.selection {
+        Some(sel) if sel.start != sel.end => sel.clone(),
+        _ => return ptr::null_mut(),
+    };
+
+    let (start, end) = selection.normalized();
+    let screen = instance.terminal.screen_mut();
+    let cols = screen.physical_cols;
+    let mut result = String::new();
+
+    // Iterate through selected rows
+    for row in start.y..=end.y {
+        // Get the line - convert to physical row index
+        let visible_row = row as wezterm_term::VisibleRowIndex;
+        let phys = screen.phys_row(visible_row);
+
+        // Determine column range for this row
+        let start_col = if row == start.y { start.x } else { 0 };
+        let end_col = if row == end.y { end.x + 1 } else { cols };
+
+        // Read cells from the line
+        let line = screen.line_mut(phys);
+        for cell in line.visible_cells() {
+            let idx = cell.cell_index();
+            if idx >= start_col && idx < end_col {
+                result.push_str(cell.str());
+            }
+        }
+
+        // Add newline between rows (but not after the last row)
+        if row < end.y {
+            result.push('\n');
+        }
+    }
+
+    // Trim trailing whitespace from each line
+    let trimmed: String = result
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    match CString::new(trimmed) {
+        Ok(c) => c.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Clear the current selection.
+///
+/// # Safety
+/// `handle` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wezterm_clear_selection(handle: *mut WezTermHandle) {
+    if handle.is_null() {
+        return;
+    }
+    (*handle).inner.selection = None;
+    (*handle).inner.selecting = false;
 }
 
 /// Check whether the terminal is in alternate screen mode.
@@ -865,4 +1038,50 @@ pub unsafe extern "C" fn wezterm_write_raw(
     let buffer = &(*handle).inner.output_buffer;
     buffer.lock().unwrap().extend_from_slice(bytes);
     true
+}
+
+/// Scroll the viewport by the given number of lines.
+/// Positive delta scrolls up (into scrollback history).
+/// Negative delta scrolls down (towards live output).
+/// When the viewport reaches the bottom (live output), it resets to 0.
+///
+/// # Safety
+/// `handle` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wezterm_scroll_viewport(handle: *mut WezTermHandle, delta: isize) {
+    if handle.is_null() {
+        return;
+    }
+    let instance = &mut (*handle).inner;
+    let total_rows = instance.terminal.screen().scrollback_rows() as isize;
+    let visible_rows = instance.terminal.screen().physical_rows as isize;
+    let max_offset = (total_rows - visible_rows).max(0);
+
+    let new_offset = (instance.viewport_offset + delta).clamp(0, max_offset);
+    instance.viewport_offset = new_offset;
+}
+
+/// Get the current viewport offset (for scrollback viewing).
+/// Returns 0 when showing live terminal output.
+///
+/// # Safety
+/// `handle` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wezterm_get_viewport_offset(handle: *const WezTermHandle) -> isize {
+    if handle.is_null() {
+        return 0;
+    }
+    (*handle).inner.viewport_offset
+}
+
+/// Reset viewport to bottom (live terminal output).
+///
+/// # Safety
+/// `handle` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wezterm_scroll_to_bottom(handle: *mut WezTermHandle) {
+    if handle.is_null() {
+        return;
+    }
+    (*handle).inner.viewport_offset = 0;
 }

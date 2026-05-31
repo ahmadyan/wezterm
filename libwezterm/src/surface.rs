@@ -71,7 +71,26 @@ pub unsafe extern "C" fn wezterm_surface_new(
 
     match result {
         Ok(Ok(ptr)) => ptr,
-        Ok(Err(_)) | Err(_) => std::ptr::null_mut(),
+        Ok(Err(e)) => {
+            let msg = format!("wezterm_surface_new failed: {:#}", e);
+            log::error!("{}", msg);
+            eprintln!("{}", msg);
+            let _ = std::fs::write("/tmp/agentastic-wezterm-surface.log", &msg);
+            std::ptr::null_mut()
+        }
+        Err(panic) => {
+            let msg = match panic.downcast_ref::<&str>() {
+                Some(s) => format!("wezterm_surface_new panicked: {}", s),
+                None => match panic.downcast_ref::<String>() {
+                    Some(s) => format!("wezterm_surface_new panicked: {}", s),
+                    None => "wezterm_surface_new panicked: <unknown payload>".to_string(),
+                },
+            };
+            log::error!("{}", msg);
+            eprintln!("{}", msg);
+            let _ = std::fs::write("/tmp/agentastic-wezterm-surface.log", &msg);
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -116,10 +135,11 @@ pub unsafe extern "C" fn wezterm_surface_render(
     let terminal_ptr = terminal;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let surface = &mut *surface_ptr;
-        let term = &mut (*terminal_ptr).inner.terminal;
+        let instance = &mut (*terminal_ptr).inner;
+        let viewport_offset = instance.viewport_offset;
         let bg_color = [bg_r, bg_g, bg_b, bg_a];
         let cursor_color = [cursor_r, cursor_g, cursor_b, cursor_a];
-        surface.renderer.render(term, bg_color, cursor_color)
+        surface.renderer.render(&mut instance.terminal, bg_color, cursor_color, viewport_offset)
     }));
 
     match result {

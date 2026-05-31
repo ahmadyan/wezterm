@@ -378,6 +378,28 @@ char *wezterm_get_current_dir(const WezTermHandle *handle);
 /// `s` must be a pointer returned by one of the string-returning functions, or NULL.
 void wezterm_free_string(char *s);
 
+/// Check whether there is an active text selection.
+///
+/// # Safety
+/// `handle` must be valid.
+bool wezterm_has_selection(const WezTermHandle *handle);
+
+/// Get the currently selected text.
+///
+/// # Returns
+/// A newly allocated C string containing the selected text, or NULL if no selection.
+/// The caller must free it with `wezterm_free_string()`.
+///
+/// # Safety
+/// `handle` must be valid.
+char *wezterm_get_selection(WezTermHandle *handle);
+
+/// Clear the current selection.
+///
+/// # Safety
+/// `handle` must be valid.
+void wezterm_clear_selection(WezTermHandle *handle);
+
 /// Check whether the terminal is in alternate screen mode.
 ///
 /// # Safety
@@ -438,6 +460,28 @@ void wezterm_erase_scrollback(WezTermHandle *handle);
 /// # Safety
 /// `handle` must be valid. `data` must point to `len` readable bytes.
 bool wezterm_write_raw(WezTermHandle *handle, const uint8_t *data, uintptr_t len);
+
+/// Scroll the viewport by the given number of lines.
+/// Positive delta scrolls up (into scrollback history).
+/// Negative delta scrolls down (towards live output).
+/// When the viewport reaches the bottom (live output), it resets to 0.
+///
+/// # Safety
+/// `handle` must be valid.
+void wezterm_scroll_viewport(WezTermHandle *handle, intptr_t delta);
+
+/// Get the current viewport offset (for scrollback viewing).
+/// Returns 0 when showing live terminal output.
+///
+/// # Safety
+/// `handle` must be valid.
+intptr_t wezterm_get_viewport_offset(const WezTermHandle *handle);
+
+/// Reset viewport to bottom (live terminal output).
+///
+/// # Safety
+/// `handle` must be valid.
+void wezterm_scroll_to_bottom(WezTermHandle *handle);
 
 /// Deprecated. Returns false. Use the surface API instead.
 bool wezterm_embed_init();

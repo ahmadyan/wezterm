@@ -67,6 +67,8 @@ pub struct GpuRenderer {
     last_cursor_color: [f32; 4],
     last_width: u32,
     last_height: u32,
+    last_viewport_offset: isize,
+    last_palette: Option<wezterm_term::color::ColorPalette>,
 
     // Cluster-level shape cache. This mirrors upstream more closely than the
     // old per-cell cache and preserves ligatures/combining marks/wide glyphs.
@@ -122,6 +124,8 @@ impl GpuRenderer {
             last_cursor_color: [f32::NAN; 4],
             last_width: 0,
             last_height: 0,
+            last_viewport_offset: isize::MAX, // sentinel: force first render
+            last_palette: None,
             shape_cache: HashMap::new(),
         })
     }
@@ -177,27 +181,40 @@ impl GpuRenderer {
     /// Render the terminal content. Walks line clusters and emits quads via
     /// wezterm-gui's quad allocator. This preserves ligatures, combining marks,
     /// double-width glyphs and font-rule based style selection.
+    ///
+    /// `viewport_offset` controls scrollback viewing:
+    /// - 0 means showing the live terminal output
+    /// - positive values scroll back into history
     pub fn render(
         &mut self,
         terminal: &mut Terminal,
         bg_color: [f32; 4],
         cursor_color: [f32; 4],
+        viewport_offset: isize,
     ) -> Result<()> {
         // Skip render if nothing has changed since last frame.
         // This is the most important optimization: the display link fires at
         // ~60fps but the terminal is idle most of the time. Without this,
         // we'd re-shape every cell with harfbuzz on every tick.
         let current_seqno = terminal.current_seqno() as u64;
+        let palette = terminal.palette();
         let seqno_changed = current_seqno != self.last_rendered_seqno;
         let size_changed = self.width != self.last_width || self.height != self.last_height;
         let colors_changed = bg_color != self.last_bg_color
             || cursor_color != self.last_cursor_color;
-        if !seqno_changed && !size_changed && !colors_changed {
+        let viewport_changed = viewport_offset != self.last_viewport_offset;
+        let palette_changed = self.last_palette.as_ref() != Some(&palette);
+        if !seqno_changed
+            && !size_changed
+            && !colors_changed
+            && !viewport_changed
+            && !palette_changed
+        {
             return Ok(());
         }
 
         for pass in 0.. {
-            self.paint_pass(terminal, bg_color, cursor_color)?;
+            self.paint_pass(terminal, &palette, bg_color, cursor_color, viewport_offset)?;
             if !self.render_state.allocated_more_quads()? {
                 break;
             }
@@ -213,24 +230,34 @@ impl GpuRenderer {
         self.last_cursor_color = cursor_color;
         self.last_width = self.width;
         self.last_height = self.height;
+        self.last_viewport_offset = viewport_offset;
+        self.last_palette = Some(palette);
         Ok(())
     }
 
     fn paint_pass(
         &mut self,
         terminal: &mut Terminal,
+        palette: &wezterm_term::color::ColorPalette,
         bg_color: [f32; 4],
         cursor_color: [f32; 4],
+        viewport_offset: isize,
     ) -> Result<()> {
         let cell_w = self.metrics.cell_size.width as f32;
         let cell_h = self.metrics.cell_size.height as f32;
         let descender = self.metrics.descender.get() as f32;
 
-        let palette = terminal.palette();
         let cursor = terminal.cursor_pos();
+        let reverse_video = terminal.get_reverse_video();
         let screen = terminal.screen_mut();
-        let rows = screen.physical_rows;
+        let visible_rows = screen.physical_rows;
         let cols = screen.physical_cols;
+        let total_rows = screen.scrollback_rows();
+
+        // Compute the background sprite texture coords before borrowing the
+        // layer below, so the immutable read of render_state.util_sprites does
+        // not overlap the mutable layer borrow.
+        let filled_box = self.render_state.util_sprites.filled_box.texture_coords();
 
         let layer = self.render_state.layer_for_zindex(0)?;
         layer.clear_quad_allocation();
@@ -247,13 +274,14 @@ impl GpuRenderer {
         {
             let bg_linear =
                 SrgbaTuple(bg_color[0], bg_color[1], bg_color[2], bg_color[3]).to_linear();
-            let mut q = quads.allocate(1)?;
+            let mut q = quads.allocate(0)?;
             q.set_position(
                 origin_x,
                 origin_y,
                 origin_x + self.width as f32,
                 origin_y + self.height as f32,
             );
+            q.set_texture(filled_box);
             q.set_fg_color(bg_linear);
             q.set_hsv(None);
             q.set_is_background();
@@ -262,9 +290,23 @@ impl GpuRenderer {
         let mut glyph_cache = self.render_state.glyph_cache.borrow_mut();
         let mut shape_cache = std::mem::take(&mut self.shape_cache);
 
-        for row_idx in 0..rows {
-            let phys = screen.phys_row(row_idx as i64);
-            let line = screen.line_mut(phys);
+        // Select which physical rows to render based on viewport offset.
+        // viewport_offset == 0 shows the live terminal (bottom of scrollback);
+        // positive values scroll back into history.
+        let first_phys_row = if viewport_offset == 0 {
+            total_rows.saturating_sub(visible_rows)
+        } else {
+            total_rows
+                .saturating_sub(visible_rows)
+                .saturating_sub(viewport_offset as usize)
+        };
+
+        for row_idx in 0..visible_rows {
+            let phys_row = first_phys_row + row_idx;
+            if phys_row >= total_rows {
+                break;
+            }
+            let line = screen.line_mut(phys_row);
             let row_top = origin_y + row_idx as f32 * cell_h;
             let row_bottom = row_top + cell_h;
             let (bidi_enabled, bidi_direction) = line.bidi_info();
@@ -285,17 +327,21 @@ impl GpuRenderer {
                 let cluster_right = cluster_left + cluster_width as f32 * cell_w;
 
                 let (fg_linear, bg_linear, bg_is_default) =
-                    Self::resolve_cluster_colors(&cfg, &palette, attrs);
+                    Self::resolve_cluster_colors(&cfg, palette, attrs, reverse_video);
 
                 if !bg_is_default {
-                    let mut q = quads.allocate(1)?;
+                    let mut q = quads.allocate(0)?;
                     q.set_position(cluster_left, row_top, cluster_right, row_bottom);
+                    q.set_texture(filled_box);
                     q.set_fg_color(bg_linear);
                     q.set_hsv(None);
                     q.set_is_background();
                 }
 
-                if cluster.text.is_empty() || cluster.text.chars().all(|ch| ch == ' ') {
+                if attrs.invisible()
+                    || cluster.text.is_empty()
+                    || cluster.text.chars().all(|ch| ch == ' ')
+                {
                     continue;
                 }
 
@@ -340,8 +386,10 @@ impl GpuRenderer {
             }
         }
 
-        if matches!(cursor.visibility, wezterm_surface::CursorVisibility::Visible)
-            && (cursor.y as usize) < rows
+        // Cursor — only when viewing the live terminal (viewport_offset == 0).
+        if viewport_offset == 0
+            && matches!(cursor.visibility, wezterm_surface::CursorVisibility::Visible)
+            && (cursor.y as usize) < visible_rows
         {
             let cx = origin_x + cursor.x as f32 * cell_w;
             let cy = origin_y + cursor.y as f32 * cell_h;
@@ -354,6 +402,7 @@ impl GpuRenderer {
             .to_linear();
             let mut q = quads.allocate(2)?;
             q.set_position(cx, cy, cx + cell_w, cy + cell_h);
+            q.set_texture(filled_box);
             q.set_fg_color(cursor_linear);
             q.set_hsv(None);
             q.set_is_background();
@@ -422,6 +471,7 @@ impl GpuRenderer {
         cfg: &ConfigHandle,
         palette: &wezterm_term::color::ColorPalette,
         attrs: &wezterm_term::CellAttributes,
+        reverse_video: bool,
     ) -> (LinearRgba, LinearRgba, bool) {
         let fg_attr = attrs.foreground();
         let mut fg = match fg_attr {
@@ -441,12 +491,17 @@ impl GpuRenderer {
         let mut bg = palette.resolve_bg(attrs.background());
         let mut bg_is_default = attrs.background() == ColorAttribute::Default;
 
-        if attrs.reverse() {
+        // Cell-level reverse XORed with terminal-wide reverse video (DECSCNM).
+        if attrs.reverse() == !reverse_video {
             std::mem::swap(&mut fg, &mut bg);
             bg_is_default = false;
         }
 
-        (fg.to_linear(), bg.to_linear(), bg_is_default)
+        (
+            fg.to_linear(),
+            bg.to_linear().mul_alpha(cfg.text_background_opacity),
+            bg_is_default,
+        )
     }
 
     /// Submit the recorded quads. Adapted verbatim from
